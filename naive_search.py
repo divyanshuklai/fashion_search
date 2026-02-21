@@ -26,73 +26,90 @@ tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
 # New SDK Initialization
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-def get_og_image(url):
+def scrape_product_details(url):
     """
-    Visits the URL and intelligently extracts the main product image.
-    Looks for JSON-LD schemas, specific meta tags, and high-res images to avoid pulling store logos.
+    Visits the URL and intelligently extracts the main product image and price.
+    Returns (image_url, price).
     """
     try:
-        # User-Agent is CRITICAL. Without it, stores like Myntra block the request.
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         }
-        response = requests.get(url, headers=headers, timeout=3) # Fast timeout
+        response = requests.get(url, headers=headers, timeout=3)
         if response.status_code != 200:
-            return None
+            return None, None
         
         soup = BeautifulSoup(response.content, "lxml")
+        img_result = None
+        price_result = None
         
-        # Helper to filter out generic store logos/placeholders
         def is_valid_product_image(img_url):
             if not img_url: return False
             img_url = img_url.lower()
             invalid_keywords = ['logo', 'placeholder', 'spinner', 'loader', 'favicon', 'default']
             return not any(kw in img_url for kw in invalid_keywords)
 
-        # 1. JSON-LD Strategy (Best for E-commerce, often SSR rendered)
+        # 1. JSON-LD Strategy (Best for E-commerce)
         for script in soup.find_all("script", type="application/ld+json"):
             try:
                 data = json.loads(script.string if script.string else "")
                 schemas = data if isinstance(data, list) else [data]
                 for schema in schemas:
-                    if schema.get("@type") == "Product" and "image" in schema:
-                        img = schema["image"]
-                        if isinstance(img, list) and len(img) > 0 and is_valid_product_image(img[0]):
-                            return img[0]
-                        elif isinstance(img, str) and is_valid_product_image(img):
-                            return img
+                    if schema.get("@type") == "Product":
+                        # Image Check
+                        if not img_result and "image" in schema:
+                            img = schema["image"]
+                            if isinstance(img, list) and len(img) > 0 and is_valid_product_image(img[0]):
+                                img_result = img[0]
+                            elif isinstance(img, str) and is_valid_product_image(img):
+                                img_result = img
+                                
+                        # Price Check
+                        if not price_result and "offers" in schema:
+                            offers = schema["offers"]
+                            if isinstance(offers, dict) and "price" in offers:
+                                price_result = str(offers["price"])
+                            elif isinstance(offers, list) and len(offers) > 0 and "price" in offers[0]:
+                                price_result = str(offers[0]["price"])
             except:
                 pass
                 
-        # 2. Look for product image meta tags specifically
-        for meta in soup.find_all("meta"):
-            prop = meta.get("property", "").lower()
-            name = meta.get("name", "").lower()
-            content = meta.get("content", "")
-            if "image" in prop or "image" in name:
-                if is_valid_product_image(content) and ("product" in content.lower() or "assets" in content.lower()):
-                    return content
+        # 2. Look for product image meta tags specifically if we still need an image
+        if not img_result:
+            for meta in soup.find_all("meta"):
+                prop = meta.get("property", "").lower()
+                name = meta.get("name", "").lower()
+                content = meta.get("content", "")
+                if "image" in prop or "image" in name:
+                    if is_valid_product_image(content) and ("product" in content.lower() or "assets" in content.lower()):
+                        img_result = content
+                        break
                     
-        # 3. Look for <img> tags that look like main product images
-        for img in soup.find_all("img"):
-            src = img.get("src") or img.get("data-src")
-            if src and ("product" in src.lower() or "assets.myntassets.com" in src.lower() or "images" in src.lower()):
-                if is_valid_product_image(src) and src.startswith("http"):
-                    return src
+        # 3. Look for <img> tags
+        if not img_result:
+            for img in soup.find_all("img"):
+                src = img.get("src") or img.get("data-src")
+                if src and ("product" in src.lower() or "assets.myntassets.com" in src.lower() or "images" in src.lower()):
+                    if is_valid_product_image(src) and src.startswith("http"):
+                        img_result = src
+                        break
         
-        # Priority 4: Fallback to Open Graph Image, but ONLY if not a logo
-        og_image = soup.find("meta", property="og:image")
-        if og_image and og_image.get("content") and is_valid_product_image(og_image["content"]):
-            return og_image["content"]
+        # Priority 4: Fallback to Open Graph Image
+        if not img_result:
+            og_image = soup.find("meta", property="og:image")
+            if og_image and og_image.get("content") and is_valid_product_image(og_image["content"]):
+                img_result = og_image["content"]
             
-        # Priority 5: Fallback to Twitter Image
-        twitter_image = soup.find("meta", name="twitter:image")
-        if twitter_image and twitter_image.get("content") and is_valid_product_image(twitter_image["content"]):
-            return twitter_image["content"]
+        # 5. Price fallbacks
+        if not price_result:
+            # Common meta price tags for Facebook/Google
+            price_meta = soup.find("meta", property="product:price:amount") or soup.find("meta", name="twitter:data1")
+            if price_meta and price_meta.get("content"):
+                price_result = price_meta["content"]
 
-        return None
+        return img_result, price_result
     except Exception:
-        return None
+        return None, None
 
 def search_fashion_products(query):
     print(f"--- Method 1: Searching for '{query}' ---")
@@ -112,8 +129,9 @@ def search_fashion_products(query):
 
     # 2. PREPARE CONTEXT
     # We strip out the messy content and just give the LLM the basics to parse
+    # Use full content if available as snippets often cut off prices
     raw_context = "\n".join([
-        f"Source {i}: {r['title']} | URL: {r['url']} | Snippet: {r['content'][:200]}" 
+        f"Source {i}: {r['title']} | URL: {r['url']} | Content: {r.get('content', '')}" 
         for i, r in enumerate(response['results'])
     ])
 
@@ -123,7 +141,8 @@ def search_fashion_products(query):
     
     Rules:
     - Return a valid JSON array of objects.
-    - Keys: "name" (specific product name), "price" (extract if available, else null), "store" (extract from URL), "link".
+    - Keys: "name" (specific product name), "price" (extract if available, format as plain number or include ₹/Rs symbol, else null), "store" (extract from URL), "link".
+    - Look carefully for prices near words like ₹, Rs, Rs., Price, MRP, or discounts.
     - Ignore generic "Shop All" or category pages. Only include specific product pages if possible.
     - If multiple products are listed in one snippet, pick the most relevant one.
     
@@ -143,22 +162,32 @@ def search_fashion_products(query):
         
         products = json.loads(result.text)
         
-        # 4. SCRAPE ACTUAL IMAGES (The Upgrade)
-        print("   📸 Scraping images from links...")
+        # 4. SCRAPE ACTUAL IMAGES & PRICES(The Upgrade)
+        print("   📸 Scraping extra details from links...")
         final_products = []
         
         for p in products:
             link = p.get('link')
             if link:
-                # Scrape the real image
-                real_image = get_og_image(link)
+                # Scrape the real image and price
+                real_image, real_price = scrape_product_details(link)
+                
+                # Image Fallbacks
                 if real_image:
                     p['image'] = real_image
-                    final_products.append(p)
                 else:
-                    # Keep it but mark image as missing (or use a placeholder)
                     p['image'] = None 
-                    final_products.append(p)
+                    
+                # Price Overrides (if LLM missed it or scraped is better)
+                if real_price:
+                    p['price'] = real_price
+                elif p.get('price'):
+                    # keep llm price we already made
+                    pass
+                else:
+                    p['price'] = None
+
+                final_products.append(p)
         
         return final_products
 
