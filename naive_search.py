@@ -28,8 +28,8 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 
 def get_og_image(url):
     """
-    Visits the URL and extracts the 'og:image' meta tag.
-    This gets the high-quality thumbnail used for social media sharing.
+    Visits the URL and intelligently extracts the main product image.
+    Looks for JSON-LD schemas, specific meta tags, and high-res images to avoid pulling store logos.
     """
     try:
         # User-Agent is CRITICAL. Without it, stores like Myntra block the request.
@@ -42,14 +42,52 @@ def get_og_image(url):
         
         soup = BeautifulSoup(response.content, "lxml")
         
-        # Priority 1: Open Graph Image (The standard)
+        # Helper to filter out generic store logos/placeholders
+        def is_valid_product_image(img_url):
+            if not img_url: return False
+            img_url = img_url.lower()
+            invalid_keywords = ['logo', 'placeholder', 'spinner', 'loader', 'favicon', 'default']
+            return not any(kw in img_url for kw in invalid_keywords)
+
+        # 1. JSON-LD Strategy (Best for E-commerce, often SSR rendered)
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                data = json.loads(script.string if script.string else "")
+                schemas = data if isinstance(data, list) else [data]
+                for schema in schemas:
+                    if schema.get("@type") == "Product" and "image" in schema:
+                        img = schema["image"]
+                        if isinstance(img, list) and len(img) > 0 and is_valid_product_image(img[0]):
+                            return img[0]
+                        elif isinstance(img, str) and is_valid_product_image(img):
+                            return img
+            except:
+                pass
+                
+        # 2. Look for product image meta tags specifically
+        for meta in soup.find_all("meta"):
+            prop = meta.get("property", "").lower()
+            name = meta.get("name", "").lower()
+            content = meta.get("content", "")
+            if "image" in prop or "image" in name:
+                if is_valid_product_image(content) and ("product" in content.lower() or "assets" in content.lower()):
+                    return content
+                    
+        # 3. Look for <img> tags that look like main product images
+        for img in soup.find_all("img"):
+            src = img.get("src") or img.get("data-src")
+            if src and ("product" in src.lower() or "assets.myntassets.com" in src.lower() or "images" in src.lower()):
+                if is_valid_product_image(src) and src.startswith("http"):
+                    return src
+        
+        # Priority 4: Fallback to Open Graph Image, but ONLY if not a logo
         og_image = soup.find("meta", property="og:image")
-        if og_image and og_image.get("content"):
+        if og_image and og_image.get("content") and is_valid_product_image(og_image["content"]):
             return og_image["content"]
             
-        # Priority 2: Twitter Image
+        # Priority 5: Fallback to Twitter Image
         twitter_image = soup.find("meta", name="twitter:image")
-        if twitter_image and twitter_image.get("content"):
+        if twitter_image and twitter_image.get("content") and is_valid_product_image(twitter_image["content"]):
             return twitter_image["content"]
 
         return None
