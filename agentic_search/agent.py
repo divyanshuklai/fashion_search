@@ -1,6 +1,7 @@
 import os
 import json
 import re
+from functools import lru_cache
 from typing import List, Optional, Dict
 from pydantic import BaseModel
 from google import genai
@@ -14,6 +15,9 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 SEARCHAPI_API_KEY = os.environ.get("SEARCH_API_KEY")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
+
+SEARCH_API_URL = "https://www.searchapi.io/api/v1/search"
+MAX_CAROUSEL_PRODUCTS = 4
 
 class Product(BaseModel):
     name: Optional[str] = "No name available"
@@ -37,15 +41,55 @@ def _extract_json_object(text: str) -> Dict:
             raise
         return json.loads(match.group(0))
 
+
+@lru_cache(maxsize=128)
+def _get_direct_product_link(product_token: str | None, product_id: str | None = None) -> Optional[str]:
+    """Resolve a Google Shopping result into a merchant link using the Google Product API."""
+    if not SEARCHAPI_API_KEY:
+        return None
+
+    params = {
+        "engine": "google_product",
+        "api_key": SEARCHAPI_API_KEY,
+        "gl": "in",
+        "hl": "en",
+    }
+    if product_token:
+        params["product_token"] = product_token
+    elif product_id:
+        params["product_id"] = product_id
+    else:
+        return None
+
+    try:
+        response = requests.get(SEARCH_API_URL, params=params, timeout=10)
+        data = response.json()
+
+        offers = data.get("offers") or []
+        if offers:
+            link = offers[0].get("link")
+            if link:
+                return link
+
+        typical_prices = data.get("typical_prices") or {}
+        link = typical_prices.get("popular_choice_link")
+        if link:
+            return link
+
+        product = data.get("product") or {}
+        return product.get("link")
+    except Exception as e:
+        print(f"   ⚠️ Could not resolve direct product link: {e}")
+        return None
+
 def search_fashion_items(query: str) -> Dict:
     print(f"   🎯 TOOL CALL: Searching for: {query}")
-    url = "https://www.searchapi.io/api/v1/search"
     params = {
         "engine": "google_shopping", "q": query, "api_key": SEARCHAPI_API_KEY,
         "gl": "in", "hl": "en", "location": "India"
     }
     try:
-        response = requests.get(url, params=params, timeout=10)
+        response = requests.get(SEARCH_API_URL, params=params, timeout=10)
         data = response.json()
         results = data.get("shopping_results", [])
         print(f"   🔍 API returned {len(results)} shopping results")
@@ -59,9 +103,11 @@ def search_fashion_items(query: str) -> Dict:
         products = []
         for r in results:
             name = r.get("title")
-            link = r.get("product_link") or r.get("offers_link") or r.get("link")
             if not name:
                 continue
+            product_token = r.get("product_token")
+            product_id = r.get("product_id")
+            link = _get_direct_product_link(product_token, product_id) or r.get("link") or r.get("offers_link") or r.get("product_link")
             products.append({
                 "name": name, 
                 "price": r.get("price"), 
@@ -69,7 +115,7 @@ def search_fashion_items(query: str) -> Dict:
                 "link": link, 
                 "image": r.get("thumbnail")
             })
-            if len(products) >= 6:
+            if len(products) >= MAX_CAROUSEL_PRODUCTS:
                 break
         return {"products": products}
     except Exception as e:
