@@ -5,6 +5,8 @@ from pydantic import BaseModel
 import uvicorn
 from naive_search import search_fashion_products
 
+MODEL_NAME = "gemma-4-31b-it"
+
 app = FastAPI(title="Fashion Discovery Chat")
 
 # Mount the static directory
@@ -19,7 +21,7 @@ async def read_root():
 
 @app.post("/api/chat")
 async def chat_endpoint(request: ChatQuery):
-    products = search_fashion_products(request.query)
+    products = search_fashion_products(request.query, MODEL_NAME)
     
     if not products:
         return {

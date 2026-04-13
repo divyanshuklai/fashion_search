@@ -12,14 +12,14 @@ load_dotenv()
 
 # --- CONFIGURATION ---
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY")
-GEMINI_API_KEY = os.environ.get("GOOGLE_API_KEY") # Ensure this is set
+GEMINI_API_KEY = os.environ.get("GOOGLE_API_KEY")
 
-# Expanded List for Diversity (Indian Context)
 STORES = [
     "myntra.com", "ajio.com", "tatacliq.com", "snitch.co.in", 
     "thehouseofrare.com", "bewakoof.com", "westside.com", 
     "pantaloons.com", "marksandspencer.in", "jaypore.com"
 ]
+
 
 # Initialize Clients
 tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
@@ -111,7 +111,7 @@ def scrape_product_details(url):
     except Exception:
         return None, None
 
-def search_fashion_products(query):
+def search_fashion_products(query, model_name):
     print(f"--- Method 1: Searching for '{query}' ---")
     
     # 1. SEARCH (Tavily)
@@ -153,7 +153,7 @@ def search_fashion_products(query):
     try:
         # structured output with pydantic is also an option, but keeping it simple for now
         result = client.models.generate_content(
-            model='gemini-2.5-flash-lite', # Faster/Better than 1.5 Flash
+            model=model_name, # Faster/Better than 1.5 Flash
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json"
